@@ -1,0 +1,21 @@
+[package]
+name = "bonten"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# クロスプラットフォームのウィンドウ・入力(VM側で使用)
+winit = "0.30"
+
+# WebGPU APIのRust実装。バックエンドは自動選択(Linux: Vulkan/GLES, macOS: Metal, Web: WebGPU)
+wgpu = "22"
+
+# 非同期初期化用(wgpuの初期化が非同期のため最小限だけ使う)
+pollster = "0.4"
+
+# ロギング(wgpuがログを吐くので入れておくと便利)
+env_logger = "0.11"
+log = "0.4"
+
+# 時間取得(FSMのタイミング用)
+# 標準のstd::time::Instantで十分なので追加依存なし

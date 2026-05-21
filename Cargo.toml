@@ -16,6 +16,7 @@ pollster = "0.4"
 # ロギング(wgpuがログを吐くので入れておくと便利)
 env_logger = "0.11"
 log = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 
 # 時間取得(FSMのタイミング用)
 # 標準のstd::time::Instantで十分なので追加依存なし

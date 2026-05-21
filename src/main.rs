@@ -53,8 +53,9 @@ impl ApplicationHandler for App {
         // wgpuの初期化は非同期なのでpollster::block_onで同期化
         let renderer = pollster::block_on(Renderer::new(window.clone()));
 
-        self.window = Some(window);
+        self.window = Some(window.clone());
         self.renderer = Some(renderer);
+        window.request_redraw();
     }
 
     fn window_event(

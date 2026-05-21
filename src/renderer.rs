@@ -1,34 +1,66 @@
 // wgpuベースのレンダラ
-// 最小プロトタイプとして、FSMの状態に応じて画面をクリアする色を変えるだけ
-// 後でこのモジュールにシェーダパイプライン、ジオメトリ、テクスチャを足していく
+// 状態に応じた背景色 + 中央に三角形を描画する
 
 use std::sync::Arc;
 use winit::window::Window;
+use wgpu::util::DeviceExt;
 
 use crate::fsm::{State, World};
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct Vertex {
+    position: [f32; 2],
+}
+
+impl Vertex {
+    fn desc() -> wgpu::VertexBufferLayout<'static> {
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Vertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
+struct ColorUniform {
+    color: [f32; 4],
+}
+
+const VERTICES: &[Vertex] = &[
+    Vertex { position: [0.0, 0.5] },
+    Vertex { position: [0.43, -0.25] },
+    Vertex { position: [-0.43, -0.25] },
+];
 
 pub struct Renderer {
     surface: wgpu::Surface<'static>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
+    pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+    uniform_buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
 }
 
 impl Renderer {
     pub async fn new(window: Arc<Window>) -> Self {
         let size = window.inner_size();
 
-        // wgpu Instance: バックエンド選択(Vulkan/Metal/GL等)
-        // Linux ARM64では通常Vulkan。Asahi/HoneykrispのVulkan実装が使われる
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::PRIMARY,
             ..Default::default()
         });
 
-        // Surface: ウィンドウとの結合
         let surface = instance.create_surface(window).unwrap();
 
-        // Adapter: 物理GPUの選択
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::default(),
@@ -40,13 +72,11 @@ impl Renderer {
 
         log::info!("adapter: {:?}", adapter.get_info());
 
-        // Device + Queue: 論理デバイスとコマンドキュー
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("Bonten Device"),
                     required_features: wgpu::Features::empty(),
-                    // 8GB RAMのM1 Airも視野に入れて、下限スペックで動くように
                     required_limits: wgpu::Limits::downlevel_defaults()
                         .using_resolution(adapter.limits()),
                     memory_hints: wgpu::MemoryHints::default(),
@@ -56,7 +86,6 @@ impl Renderer {
             .await
             .expect("デバイス取得失敗");
 
-        // Surface configuration: フォーマット、サイズ、提示モード
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
@@ -77,11 +106,101 @@ impl Renderer {
         };
         surface.configure(&device, &config);
 
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("triangle shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/triangle.wgsl").into()),
+        });
+
+        let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vertex buffer"),
+            contents: bytemuck::cast_slice(VERTICES),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+
+        let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("color uniform"),
+            size: std::mem::size_of::<ColorUniform>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("color bind group layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("color bind group"),
+            layout: &bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("triangle pipeline layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("triangle pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: "vs_main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                buffers: &[Vertex::desc()],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: "fs_main",
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: config.format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
         Self {
             surface,
             device,
             queue,
             config,
+            pipeline,
+            vertex_buffer,
+            uniform_buffer,
+            bind_group,
         }
     }
 
@@ -93,10 +212,15 @@ impl Renderer {
         }
     }
 
-    /// 1フレーム描画
-    /// 現状は世界の状態に応じた色でクリアするだけ
     pub fn render(&mut self, world: &World) {
-        let clear_color = color_for_state(world.state(), world.time_in_state());
+        let clear_color = bg_color_for_state(world.state(), world.time_in_state());
+        let tri_color = triangle_color_for_state(world.state(), world.time_in_state());
+
+        self.queue.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::cast_slice(&[ColorUniform { color: tri_color }]),
+        );
 
         let output = match self.surface.get_current_texture() {
             Ok(o) => o,
@@ -117,8 +241,7 @@ impl Renderer {
             });
 
         {
-            // 描画パス: ここではclearするだけ。後でdraw_call群を足す
-            let _render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("main pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
@@ -130,9 +253,13 @@ impl Renderer {
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
-                occlusion_query_writes: None,
+                occlusion_query_set: None,
             });
-            // ここに draw_call を追加していく
+
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..3, 0..1);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -140,25 +267,29 @@ impl Renderer {
     }
 }
 
-/// FSMの状態を背景色にマップする
-/// 状態に入ってからの経過時間で滑らかに変化させる(プロトタイプの楽しみ)
-fn color_for_state(state: State, t_in_state: f64) -> wgpu::Color {
-    // 各状態の「中心色」を定義
+fn bg_color_for_state(state: State, t_in_state: f64) -> wgpu::Color {
     let (r, g, b) = match state {
-        State::Void => (0.02, 0.02, 0.04),     // 深い藍黒 - 無
-        State::Arising => (0.1, 0.3, 0.6),     // 青 - 起こり始め
-        State::Present => (0.7, 0.6, 0.2),     // 金 - 在ること
-        State::Ceasing => (0.4, 0.1, 0.15),    // 暗赤 - 滅
+        State::Void => (0.02, 0.02, 0.04),
+        State::Arising => (0.1, 0.3, 0.6),
+        State::Present => (0.7, 0.6, 0.2),
+        State::Ceasing => (0.4, 0.1, 0.15),
     };
-
-    // 状態に入った瞬間に明るくし、時間経過で安定値へ収束させる
-    // (キオスク作品としての"呼吸"のような変化を仮実装)
     let pulse = (-t_in_state * 0.8).exp() * 0.3;
-
     wgpu::Color {
-        r: (r + pulse).min(1.0) as f64,
-        g: (g + pulse).min(1.0) as f64,
-        b: (b + pulse).min(1.0) as f64,
+        r: (r + pulse).min(1.0),
+        g: (g + pulse).min(1.0),
+        b: (b + pulse).min(1.0),
         a: 1.0,
     }
+}
+
+fn triangle_color_for_state(state: State, t_in_state: f64) -> [f32; 4] {
+    let (r, g, b): (f32, f32, f32) = match state {
+        State::Void => (0.9, 0.9, 1.0),
+        State::Arising => (0.4, 0.8, 1.0),
+        State::Present => (1.0, 0.97, 0.7),
+        State::Ceasing => (1.0, 0.55, 0.1),
+    };
+    let pulse = (-t_in_state as f32 * 0.8).exp() * 0.2;
+    [(r + pulse).min(1.0), (g + pulse).min(1.0), (b + pulse).min(1.0), 1.0]
 }

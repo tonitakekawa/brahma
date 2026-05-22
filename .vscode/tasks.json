@@ -26,5 +26,14 @@
       },
       "problemMatcher": "$rustc"
     }
+    ,{
+      "label": "Push",
+      "type": "shell",
+      "command": "git add -A && git commit -m '.' && git push",
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      }
+    }
   ]
 }
